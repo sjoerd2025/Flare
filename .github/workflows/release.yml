@@ -24,12 +24,13 @@ on:
   workflow_dispatch:
     inputs:
       dry_run:
-        description: 'Build the installers but do not upload them'
+        description: 'Use SignPath test-signing on Windows; keep artifacts without creating a release'
         type: boolean
         default: true
 
 permissions:
   contents: write
+  actions: read
 
 jobs:
   draft:
@@ -98,7 +99,93 @@ jobs:
         run: npm run build
 
       - name: Package
+        if: runner.os != 'Windows'
         run: npx electron-builder --publish never
+
+      - name: Check Windows signing credentials
+        if: runner.os == 'Windows'
+        shell: pwsh
+        env:
+          SIGNPATH_API_TOKEN: ${{ secrets.SIGNPATH_API_TOKEN }}
+        run: |
+          if (!$env:SIGNPATH_API_TOKEN) { throw 'Set the SIGNPATH_API_TOKEN Actions secret. See docs/windows-signing.md.' }
+
+      - name: Prepare Windows application
+        if: runner.os == 'Windows'
+        run: npx electron-builder --win --x64 --dir --publish never -c.win.signExecutable=false
+
+      - name: Upload application for signing
+        if: runner.os == 'Windows'
+        id: unsigned-app
+        uses: actions/upload-artifact@v4
+        with:
+          name: unsigned-windows-app
+          path: release/win-unpacked/Flare.exe
+          if-no-files-found: error
+          retention-days: 7
+
+      - name: Sign Windows application
+        if: runner.os == 'Windows'
+        uses: signpath/github-action-submit-signing-request@f6d04783b4569d051e0c80105fe66e82819d0092 # v3
+        with:
+          api-token: ${{ secrets.SIGNPATH_API_TOKEN }}
+          organization-id: d5edea92-dfed-4a46-aa85-32c94fdec2c1
+          project-slug: Flare
+          signing-policy-slug: ${{ github.event_name == 'workflow_dispatch' && inputs.dry_run && 'test-signing' || 'release-signing' }}
+          artifact-configuration-slug: windows-app
+          github-artifact-id: ${{ steps.unsigned-app.outputs.artifact-id }}
+          wait-for-completion: true
+          wait-for-completion-timeout-in-seconds: 3600
+          output-artifact-directory: signed/app
+
+      - name: Verify and package signed Windows application
+        if: runner.os == 'Windows'
+        shell: pwsh
+        env:
+          TRUST_SIGNPATH_TEST_CERTIFICATE: ${{ github.event_name == 'workflow_dispatch' && inputs.dry_run && 'true' || 'false' }}
+        run: |
+          ./scripts/verify-windows-signature.ps1 -Path signed/app/Flare.exe -TrustTestCertificate:($env:TRUST_SIGNPATH_TEST_CERTIFICATE -eq 'true')
+          Copy-Item -LiteralPath signed/app/Flare.exe -Destination release/win-unpacked/Flare.exe -Force
+          npx electron-builder --win nsis zip --x64 --prepackaged release/win-unpacked --publish never -c.win.signExecutable=false
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          ./scripts/verify-windows-signature.ps1 -Path release/win-unpacked/Flare.exe -SameSignerAs signed/app/Flare.exe
+
+      - name: Upload installer for signing
+        if: runner.os == 'Windows'
+        id: unsigned-installer
+        uses: actions/upload-artifact@v4
+        with:
+          name: unsigned-windows-installer
+          path: release/Flare-*-Windows-x64.exe
+          if-no-files-found: error
+          retention-days: 7
+
+      - name: Sign Windows installer
+        if: runner.os == 'Windows'
+        uses: signpath/github-action-submit-signing-request@f6d04783b4569d051e0c80105fe66e82819d0092 # v3
+        with:
+          api-token: ${{ secrets.SIGNPATH_API_TOKEN }}
+          organization-id: d5edea92-dfed-4a46-aa85-32c94fdec2c1
+          project-slug: Flare
+          signing-policy-slug: ${{ github.event_name == 'workflow_dispatch' && inputs.dry_run && 'test-signing' || 'release-signing' }}
+          artifact-configuration-slug: windows-installer
+          github-artifact-id: ${{ steps.unsigned-installer.outputs.artifact-id }}
+          wait-for-completion: true
+          wait-for-completion-timeout-in-seconds: 3600
+          output-artifact-directory: signed/installer
+
+      - name: Verify final Windows artifacts and refresh update metadata
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          ./scripts/verify-windows-signature.ps1 -Path 'signed/installer/Flare-*-Windows-x64.exe' -SameSignerAs signed/app/Flare.exe
+          Get-Item signed/installer/Flare-*-Windows-x64.exe | Copy-Item -Destination release -Force
+          $archives = @(Get-Item release/Flare-*-Windows-x64.zip)
+          if ($archives.Count -ne 1) { throw 'Expected one Windows portable archive' }
+          Expand-Archive -LiteralPath $archives[0].FullName -DestinationPath signed/portable
+          ./scripts/verify-windows-signature.ps1 -Path signed/portable/Flare.exe -SameSignerAs signed/app/Flare.exe
+          node scripts/refresh-windows-update-metadata.mjs release
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
       - name: Upload into the draft
         if: ${{ github.event_name == 'push' || !inputs.dry_run }}

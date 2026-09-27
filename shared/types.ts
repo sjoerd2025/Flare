@@ -61,7 +61,7 @@ export interface GraphNode {
   /** TODO/FIXME/HACK/XXX marker count. */
   todos: number;
   /**
-   * Prose rather than code.
+   * Repository content without code analysis (documents, config, data, assets).
    *
    * A README, a plan, a decision an agent wrote down: on the graph because it
    * is part of what the repo says about itself and because the links in it are

@@ -1,3 +1,4 @@
+import { checkExplorer } from './explorerChecks';
 import { execFileSync, spawn, type ChildProcess } from 'node:child_process';
 import * as fs from 'node:fs';
 import * as os from 'node:os';
@@ -577,4 +578,67 @@ test('the start screen never offers "elsewhere", because nothing is open to lose
   await expect(page.getByTestId('new-project-dialog')).toBeVisible();
   await expect(page.getByTestId('new-project-elsewhere')).toHaveCount(0);
   await expect(page.getByTestId('new-project-here')).toBeVisible();
+});
+
+test('explorer file management works in the browser', async ({ page }) => {
+  await open(page, slugA);
+  await checkExplorer(page, rootA);
+});
+
+
+test('bulk checkout and pull keep the UI usable and converge on the new files', async ({ page }) => {
+  const bulkRoot = makeFixture('bulk');
+  const git = (...args: string[]) => execFileSync('git', args, { cwd: bulkRoot, windowsHide: true, stdio: 'pipe' });
+  fs.mkdirSync(path.join(bulkRoot, 'src/bulk'));
+  for (let i = 0; i < 320; i++) fs.writeFileSync(path.join(bulkRoot, `src/bulk/file-${i}.ts`), `export const value = ${i};`);
+  git('add', '.'); git('commit', '-qm', 'bulk base');
+  git('checkout', '-qb', 'bulk-update');
+  for (let i = 0; i < 320; i++) fs.writeFileSync(path.join(bulkRoot, `src/bulk/file-${i}.ts`), `export function value(x: number) { return x ? ${i} : -1; }`);
+  fs.unlinkSync(path.join(bulkRoot, 'src/bulk/file-0.ts'));
+  fs.writeFileSync(path.join(bulkRoot, 'bulk-added.sql'), 'SELECT 1;');
+  git('add', '-A'); git('commit', '-qm', 'bulk update');
+  git('checkout', '-q', 'main');
+  const slug = await serve(bulkRoot);
+  await open(page, slug);
+
+  // Query the index directly; project:get also launches an unrelated Git status read.
+  const graphIds = () => page.evaluate(() => new Promise<string[]>((resolve, reject) => {
+    const url = new URL('ws', location.href); url.protocol = 'ws:';
+    const socket = new WebSocket(url);
+    const ids: string[] = [];
+    let responses = 0;
+    const timer = setTimeout(() => { socket.close(); reject(new Error('graph request timed out')); }, 5000);
+    socket.onerror = () => { clearTimeout(timer); reject(new Error('graph socket error')); };
+    socket.onopen = () => {
+      ['bulk-added.sql', 'src/bulk/file-0.ts'].forEach((id, index) => {
+        socket.send(JSON.stringify({ id: index + 1, channel: 'node:details', args: [id] }));
+      });
+    };
+    socket.onmessage = (event) => {
+      const message = JSON.parse(event.data);
+      if (message.id !== 1 && message.id !== 2) return;
+      if (message.ok === false) { clearTimeout(timer); socket.close(); reject(new Error(message.error)); return; }
+      if (message.result) ids.push(message.result.node.id);
+      if (++responses === 2) { clearTimeout(timer); socket.close(); resolve(ids); }
+    };
+  }));
+
+  expect((await graphIds()).includes('src/bulk/file-0.ts')).toBe(true);
+  for (const operation of ['checkout', 'pull']) {
+    if (operation === 'checkout') git('checkout', '-q', 'bulk-update');
+    else git('pull', '--ff-only', '.', 'bulk-update');
+    const filter = page.getByLabel('Filter files', { exact: true });
+    await filter.fill('bulk-added');
+    await expect(filter).toHaveValue('bulk-added', { timeout: 5000 });
+    await expect(page.getByTestId('tree-file-bulk-added.sql')).toBeVisible({ timeout: 30_000 });
+    await expect.poll(async () => {
+      const ids = await graphIds();
+      return ids.includes('bulk-added.sql') && !ids.includes('src/bulk/file-0.ts');
+    }, { timeout: 30_000 }).toBe(true);
+    await expect(page.getByTestId('statusbar')).not.toContainText('Indexing failed');
+    if (operation === 'checkout') {
+      git('checkout', '-q', 'main');
+      await expect.poll(async () => (await graphIds()).includes('src/bulk/file-0.ts'), { timeout: 30_000 }).toBe(true);
+    }
+  }
 });

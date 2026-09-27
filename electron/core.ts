@@ -221,6 +221,7 @@ export function createCore(options: CoreOptions): Core {
   async function openProject(root: string): Promise<ProjectInfo> {
     if (session) await session.dispose();
     session = new ProjectSession(root, dataDir, {
+      onIndexing: (state) => onEvent('evt:indexing', state),
       onGraphPatch: (patch) => onEvent('evt:graphPatch', patch),
       onFilesChanged: (event) => onEvent('evt:filesChanged', event),
       onGitStatus: (status) => onEvent('evt:gitStatus', status),
@@ -368,6 +369,8 @@ export function createCore(options: CoreOptions): Core {
     (query: string, replacement: string, options?: SearchOptions, paths?: string[]) =>
       session?.replaceText(query, replacement, options ?? {}, paths) ?? { files: 0, replacements: 0 },
   );
+  on('file:transfer', (sources: string[], target: string, move: boolean) => session?.transferFiles(sources, target, move) ?? { error: 'No project open' });
+  on('file:import', (rel: string, base64: string) => session?.importFile(rel, base64) ?? { error: 'No project open' });
   on('file:create', (rel: string) => session?.createFile(rel) ?? false);
   on('dir:create', (rel: string) => session?.createDir(rel) ?? false);
   on('project:rescan', () => session?.refreshFromDisk() ?? Promise.resolve());

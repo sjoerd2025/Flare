@@ -1,3 +1,4 @@
+import { checkExplorer } from './explorerChecks';
 import { execFileSync } from 'node:child_process';
 import * as fs from 'node:fs';
 import * as os from 'node:os';
@@ -103,21 +104,22 @@ test('a small project boots unfolded; folds all, one, and back via the legend', 
   // app->util, app->helper, helper->util, script->common = 4 edges, and this
   // README links nowhere yet
   await expect(page.getByTestId('stats')).toHaveText('6 nodes · 4 edges');
+  if (await page.getByTestId('legend-collapse').getAttribute('aria-expanded') === 'false') await page.getByTestId('legend-collapse').click();
   await expect(page.getByTestId('legend')).toContainText('src');
-  await expect(page.getByTestId('legend')).toContainText('0/2 folded');
+  await expect(page.getByTestId('legend')).toContainText('0 grouped');
 
   // fold everything into cluster meta-nodes, then bring it all back
   await page.getByTestId('legend-fold-all').click();
   // two folder cards, and the README, which is at the root and so in neither
   await expect(page.getByTestId('stats')).toHaveText('3 nodes · 0 edges');
-  await expect(page.getByTestId('legend')).toContainText('2/2 folded');
+  await expect(page.getByTestId('legend')).toContainText('2 grouped');
   await page.getByTestId('legend-unfold-all').click();
   await expect(page.getByTestId('stats')).toHaveText('6 nodes · 4 edges');
 
   // and a single folder on its own: src/ folds to one card, tools/ stays open
   await page.getByTestId('legend-src').click();
   await expect(page.getByTestId('stats')).toContainText('4 nodes');
-  await expect(page.getByTestId('legend')).toContainText('1/2 folded');
+  await expect(page.getByTestId('legend')).toContainText('1 grouped');
   await page.getByTestId('legend-src').click();
   await expect(page.getByTestId('stats')).toHaveText('6 nodes · 4 edges');
 });
@@ -134,6 +136,7 @@ test('search selects a node and details show dependencies and blast radius', asy
   await page.getByTestId('tab-graph').click();
   await page.getByTestId('search-input').fill('util.ts');
   await page.getByTestId('search-input').press('Enter');
+  await page.getByTestId('tree-file-src/util.ts').dblclick();
   await expect(page.getByTestId('details-panel')).toBeVisible();
   await expect(page.getByTestId('details-panel')).toContainText('src/util.ts');
   // util.ts is imported by app.ts and helper.ts
@@ -210,6 +213,7 @@ test('shadow timeline records snapshots and restores a file', async () => {
   await page.getByTestId('search-input').fill('util.ts');
   await page.getByTestId('search-input').press('Enter');
   await page.getByTestId('search-input').fill('');
+  await page.getByTestId('tree-file-src/util.ts').dblclick();
   await expect(page.getByTestId('details-panel')).toContainText('Local history');
   const revertLinks = page.getByTestId('details-panel').getByText('revert to this');
   await expect(revertLinks.first()).toBeVisible({ timeout: 20_000 });
@@ -421,7 +425,7 @@ test('canvas, wheel and districts views all render the same graph', async () => 
   await expect.poll(async () => (await readStats()).nodes).toBe(before.nodes);
   // clicking a node pins its dependency directions
   await page.locator('[data-testid="wnode-src/app.ts"] .dot').click();
-  await expect(page.getByTestId('details-panel')).toContainText('src/app.ts');
+  await expect(page.getByTestId('file-analytics')).toHaveCount(0);
 
   await pickView('districts');
   await expect(page.getByTestId('view-districts')).toHaveClass(/active/);
@@ -586,10 +590,10 @@ test('a card click selects, a folder double-click unfolds, and a drag moves it',
   // the two folder cards, plus the two documents at the root, which are in
   // neither of them — README.md, and the GUIDE.md written further up
   await expect(page.getByTestId('stats')).toHaveText('4 nodes · 0 edges');
-  await expect(page.getByTestId('legend')).toContainText('2/2 folded');
+  await expect(page.getByTestId('legend')).toContainText('2 grouped');
   await page.getByTestId('gcard-@dir:src').dblclick();
   // src alone comes back; tools stays a single card
-  await expect(page.getByTestId('legend')).toContainText('1/2 folded');
+  await expect(page.getByTestId('legend')).toContainText('1 grouped');
   await expect(page.getByTestId('legend')).toContainText('▾ src');
   await expect(page.getByTestId('legend')).toContainText('▣ tools');
   await page.getByTestId('legend-unfold-all').click();
@@ -800,9 +804,8 @@ test('insights: unified metrics table, issue feed, live todo-debt alert', async 
   await page.getByTestId('units-scaled').click();
   await expect(sizeCell).toHaveText(/^\d+$/);
 
-  // clicking a metrics row selects the file in the details panel
+  // A metrics row selects a file; analytics requires an explicit open.
   await page.getByTestId('metrics-row-src/util.ts').click();
-  await expect(page.getByTestId('details-panel')).toContainText('src/util.ts');
 
   // The details panel and the table must quote the same risk. They used to
   // disagree — a raw unbounded score in one, a 0-100 composite in the other,
@@ -811,6 +814,7 @@ test('insights: unified metrics table, issue feed, live todo-debt alert', async 
   const tableRisk = (
     await page.getByTestId('metrics-row-src/util.ts').locator('td').nth(1).textContent()
   )?.trim();
+  await page.getByTestId('tree-file-src/util.ts').dblclick();
   await expect(page.getByTestId('risk-score')).toHaveText(new RegExp(`^${tableRisk}/100 · `));
 
   await page.getByTestId('btn-approve-all').click();
@@ -1654,6 +1658,7 @@ test('a selected node offers to start a task on it', async () => {
   await page.getByTestId('search-input').fill('src/util.ts');
   await page.getByTestId('search-input').press('Enter');
   await page.getByTestId('search-input').fill('');
+  await page.getByTestId('tree-file-src/util.ts').dblclick();
   await expect(page.getByTestId('details-panel')).toBeVisible();
 
   await page.getByTestId('btn-new-task').click();
@@ -2667,4 +2672,8 @@ test('double-clicking code peeks at it in the editor Flare uses everywhere', asy
   await expect(peek).toBeHidden();
   await expect(page.getByTestId('editor-src/app.ts')).toBeVisible();
   await page.getByTestId('tab-graph').click();
+});
+
+test('explorer file management works on desktop', async () => {
+  await checkExplorer(page, fixture);
 });

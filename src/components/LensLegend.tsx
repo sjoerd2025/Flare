@@ -95,71 +95,40 @@ export function LensLegend({
       )}
 
       {show !== 'reading' && clusters.length > 0 && (
-        <div className={`legend${collapsed ? ' folded-away' : ''}`} data-testid="legend">
-          {/*
-            A repo with thirty top-level folders puts thirty chips across the
-            top of the graph, which is a lot of chrome above the thing you came
-            to look at. The summary stays either way, so nothing is lost by
-            putting the rest away.
-          */}
-          <button
-            className="legend-collapse"
-            aria-expanded={!collapsed}
-            title={collapsed ? 'Show the folder chips' : 'Hide the folder chips'}
-            onClick={onToggleCollapsed}
-            data-testid="legend-collapse"
-          >
-            {collapsed ? '▸' : '▾'}
+        <section className={`graph-folders${collapsed ? ' folded-away' : ''}`} data-testid="legend">
+          <button className="graph-folders-heading" aria-expanded={!collapsed}
+            onClick={onToggleCollapsed} data-testid="legend-collapse"
+            title={collapsed ? 'Show graph folder controls' : 'Hide graph folder controls'}>
+            <span aria-hidden="true">{collapsed ? '\u25b8' : '\u25be'}</span>
+            <span>Graph folders</span>
+            <span className="graph-folders-count">{folded} grouped</span>
           </button>
-          <span className="legend-label" title="each chip folds its folder into a single card, or unfolds it again">
-            Folders
-            {foldable.length > 0 && (
-              <span className="legend-count">
-                {folded}/{foldable.length} folded
-              </span>
-            )}
-          </span>
-          {!collapsed && foldable.length > 0 && (
-            <span className="legend-actions">
-              <button
-                className="legend-act"
-                title="Fold every folder into a single card — the fastest way out of a hairball"
-                onClick={onFoldAll}
-                disabled={folded === foldable.length}
-                data-testid="legend-fold-all"
-              >
-                <IconFoldAll size={11} /> Fold all
+          {!collapsed && <>
+            <p className="graph-folders-help">Group a folder into one graph card, or show its files.</p>
+            {foldable.length > 0 && <div className="graph-folders-actions">
+              <button onClick={onFoldAll} disabled={folded === foldable.length} data-testid="legend-fold-all">
+                <IconFoldAll size={12} /> Group all
               </button>
-              <button
-                className="legend-act"
-                title="Unfold every folder so each file gets its own card"
-                onClick={onUnfoldAll}
-                disabled={folded === 0}
-                data-testid="legend-unfold-all"
-              >
-                <IconUnfoldAll size={11} /> Unfold all
+              <button onClick={onUnfoldAll} disabled={folded === 0} data-testid="legend-unfold-all">
+                <IconUnfoldAll size={12} /> Show all files
               </button>
-            </span>
-          )}
-          {!collapsed &&
-            clusters.map((c) => (
-              <button
-                key={c.name}
-                className={`item clickable${c.collapsed ? ' collapsed' : ''}`}
-                title={
-                  c.collapsed
-                    ? `${c.name}/ — ${c.count} files, folded into one card. Click to unfold.`
-                    : `${c.name}/ — ${c.count} files. Click to fold into one card.`
-                }
-                onClick={() => onToggleDir(c.name)}
-                data-testid={`legend-${c.name}`}
-              >
-                <span className="swatch" style={{ background: c.color }} />
-                {c.collapsed ? '▣ ' : '▾ '}
-                {c.name} ({c.count})
-              </button>
-            ))}
-        </div>
+            </div>}
+            <div className="graph-folders-list">
+              {clusters.map((c) => {
+                const canFold = c.name !== '(root)' && c.count >= 2;
+                return <button key={c.name} className="graph-folder-row" disabled={!canFold}
+                  onClick={() => onToggleDir(c.name)} data-testid={`legend-${c.name}`}
+                  aria-label={`${c.name}: ${c.count} files${canFold ? c.collapsed ? ', show files' : ', group into one card' : ''}`}
+                  title={canFold ? c.collapsed ? 'Show the files in this folder on the graph' : 'Group this folder into one graph card' : 'No folder group available'}>
+                  <span className="graph-folder-swatch" style={{ background: c.color }} />
+                  <span className="graph-folder-name">{c.name === '(root)' ? 'Root files' : c.name}</span>
+                  <span className="graph-folder-count">{c.count}</span>
+                  <span className="graph-folder-action">{canFold ? c.collapsed ? 'Show files' : 'Group' : ''}</span>
+                </button>;
+              })}
+            </div>
+          </>}
+        </section>
       )}
     </>
   );

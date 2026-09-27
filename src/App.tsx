@@ -1,3 +1,4 @@
+import { FileAnalytics } from './components/FileAnalytics';
 import { forwardRef, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import type {
   ChangeEvent,
@@ -30,7 +31,7 @@ import { previewKindFor } from '../shared/preview';
 import { plural, when } from './format';
 import { clampTerminal, openingTerminalHeight } from './layout';
 
-import { FileTree, STATE_COLOR, type FileTreeHandle } from './components/FileTree';
+import { FileTree, type FileTreeHandle } from './components/FileTree';
 import {
   CanvasView,
   type CanvasProps,
@@ -40,7 +41,7 @@ import {
 import { WheelView } from './components/WheelView';
 import { DistrictsView } from './components/DistrictsView';
 import { LensLegend } from './components/LensLegend';
-import { IconBoard, IconChannel, IconGraph, IconHistory, IconInsights, IconRelayout, IconReview } from './components/icons';
+import { IconNewFile, IconNewFolder, IconCollapseAll, IconBoard, IconChannel, IconGraph, IconHistory, IconInsights, IconRelayout, IconReview } from './components/icons';
 import { HelpOverlay } from './components/HelpOverlay';
 import { MenuBar, tidySeparators, type MenuDef } from './components/MenuBar';
 import { Splitter } from './components/Splitter';
@@ -60,7 +61,7 @@ import {
 } from '../shared/tasks';
 import type { ChangeBurst } from '../shared/activity';
 import { unverifiedCount } from '../shared/activity';
-import { computeInsights, type Insights } from '../shared/insights';
+import { type Insights } from '../shared/insights';
 import { ContextMenu, Modal, type MenuItem, type ModalRequest } from './components/Menus';
 import { Toasts, toast } from './components/Toasts';
 import { RiskAlerts } from './components/RiskAlerts';
@@ -288,6 +289,8 @@ export function App() {
   const [symbolGraphs, setSymbolGraphs] = useState<ReadonlyMap<string, SymbolGraph>>(new Map());
   const [tabs, setTabs] = useState<Tab[]>([]);
   const [activeTab, setActiveTab] = useState<string>('graph');
+  const [indexing, setIndexing] = useState<{ active: boolean; error?: string }>({ active: false });
+  const [analyticsPath, setAnalyticsPath] = useState<string | null>(null);
   const [dirtyTabs, setDirtyTabs] = useState<Set<string>>(new Set());
   const [externalVersions, setExternalVersions] = useState<Record<string, number>>({});
   const [pendingLine, setPendingLine] = useState<Record<string, number>>({});
@@ -348,7 +351,7 @@ export function App() {
   /** canvas: a plain drag picks files rather than moving the view */
   const [selectMode, setSelectMode] = useState(false);
   /** the folder chips are put away; the summary row stays */
-  const [legendCollapsed, setLegendCollapsed] = useState(false);
+  const [legendCollapsed, setLegendCollapsed] = useState(true);
   const [bursts, setBursts] = useState<ChangeBurst[]>([]);
   const [lastGreen, setLastGreen] = useState<{ hash: string; at: number } | null>(null);
   /**
@@ -376,7 +379,7 @@ export function App() {
    * bar's chip and the panel's own button are two doors to one wizard.
    */
   const [routineNonce, setRoutineNonce] = useState(0);
-  const [sidebarWidth, setSidebarWidth] = useState(216);
+  const [sidebarWidth, setSidebarWidth] = useState(272);
   // The terminal takes a share of the window rather than a fixed 280px, so a
   // taller screen gives the graph the extra room instead of the shell.
   const [terminalHeight, setTerminalHeight] = useState(() => openingTerminalHeight(undefined, window.innerHeight));
@@ -391,6 +394,8 @@ export function App() {
     projectRef.current = info;
     setProject(info);
     setFileTree(info.fileTree);
+    setIndexing({ active: false });
+    setAnalyticsPath(null);
     setGitStatus(info.git);
     setSelected(null);
     setTabs([]);
@@ -518,6 +523,7 @@ export function App() {
     });
     const unsubs = [
       api.on('evt:projectOpened', (payload) => resetForProject(payload as ProjectInfo)),
+      api.on('evt:indexing', (payload) => setIndexing(payload as { active: boolean; error?: string })),
       api.on('evt:graphPatch', (payload) => {
         const patch = payload as GraphPatch;
         const nodes = fullNodesRef.current;
@@ -678,21 +684,21 @@ export function App() {
 
   useEffect(() => {
     if (!project) return;
+    let worker: Worker | null = null;
     const timer = setTimeout(() => {
-      setInsights(
-        computeInsights({
-          nodes: [...fullNodesRef.current.values()],
-          edges: [...fullEdgesRef.current.values()],
-          churn,
-          coverage,
-          changedAt,
-          changedBy,
-          review: reviewInfo?.review ?? null,
-          snapshots,
-        }),
-      );
+      worker = new Worker(new URL('./insights.worker.ts', import.meta.url), { type: 'module' });
+      worker.onmessage = (event: MessageEvent<Insights>) => {
+        setInsights(event.data);
+        worker?.terminate();
+        worker = null;
+      };
+      worker.postMessage({
+        nodes: [...fullNodesRef.current.values()], edges: [...fullEdgesRef.current.values()],
+        churn, coverage, changedAt, changedBy, review: reviewInfo?.review ?? null, snapshots,
+      });
     }, 600);
-    return () => clearTimeout(timer);
+    // Cancel obsolete calculations instead of queuing another full graph behind them.
+    return () => { clearTimeout(timer); worker?.terminate(); };
   }, [project, graphVersion, changedAt, changedBy, churn, coverage, reviewInfo, snapshots]);
 
   const seenCriticalsRef = useRef<Set<string>>(new Set());
@@ -1299,6 +1305,13 @@ export function App() {
     // approving is a claim, this is the thing the never-read lens counts
     void api.markRead([path]).then(() => api.reviewGet().then((r) => r && setReviewInfo(r)));
   }, []);
+
+  const openFileWithAnalytics = useCallback((path: string, line?: number) => {
+    setPeekFile(null);
+    openFile(path, line);
+    setAnalyticsPath(path);
+  }, [openFile]);
+
 
   const openDiff = useCallback((path: string, source: 'head' | { hash: string }) => {
     const suffix = source === 'head' ? 'HEAD' : source.hash.slice(0, 7);
@@ -1989,6 +2002,8 @@ export function App() {
 
     if (entries.length === 0) {
       items.push(
+        { id: 'paste-files', label: 'Paste files', run: () => treeRef.current?.paste('') },
+        { id: 'upload-files', label: 'Upload files...', run: () => treeRef.current?.upload('') },
         { id: 'new-file', label: 'New file…', run: () => doCreateFile('') },
         { id: 'new-folder', label: 'New folder…', run: () => doCreateFolder('') },
         { id: 'sep0', label: '', separator: true },
@@ -2005,6 +2020,7 @@ export function App() {
       return items;
     }
 
+    if (files.length === 1) items.push({ id: 'file-analytics', label: 'Open with file analytics', run: () => openFileWithAnalytics(files[0]) });
     if (files.length > 0) {
       items.push({
         id: 'open',
@@ -2084,6 +2100,12 @@ export function App() {
     items.push({ id: 'sep1', label: '', separator: true });
     const newFileTarget =
       dirs[0] ?? (files[0]?.includes('/') ? files[0].slice(0, files[0].lastIndexOf('/')) : '');
+    items.push(
+      { id: 'copy-files', label: 'Copy files', run: () => treeRef.current?.copy(allPaths) },
+      { id: 'cut-files', label: 'Cut files', run: () => treeRef.current?.copy(allPaths, true) },
+      { id: 'paste-files', label: 'Paste files here', run: () => treeRef.current?.paste(newFileTarget) },
+      { id: 'upload-files', label: 'Upload files here...', run: () => treeRef.current?.upload(newFileTarget) },
+    );
     items.push({
       id: 'new-file',
       label: `New file in ${newFileTarget === '' ? 'root' : `${newFileTarget}/`}…`,
@@ -2145,7 +2167,7 @@ export function App() {
       run: () => doDelete(entries),
     });
     return items;
-  }, [ctxMenu, unreviewed, collapsedDirs, allClusters, doCreateFile, doCreateFolder, doRename, doDelete, copyPaths, openFile, toggleDir, updateCollapsed, taskFromSelection]);
+  }, [ctxMenu, unreviewed, collapsedDirs, allClusters, doCreateFile, doCreateFolder, doRename, doDelete, copyPaths, openFile, openFileWithAnalytics, toggleDir, updateCollapsed, taskFromSelection]);
 
   const paletteItems = useMemo<PaletteItem[]>(() => {
     const items: PaletteItem[] = [];
@@ -2299,46 +2321,29 @@ export function App() {
     });
   }, []);
 
-  // what is currently selected (file, dir meta-node, or symbol)?
-  /*
-   * The details panel, dismissed without losing your place.
-   *
-   * It is derived from the selection, so the only way to close it used to be
-   * to deselect — which also drops the highlight on the graph and is a
-   * different intention from "I have read this". Any *new* selection reopens
-   * it, because picking a node is how you ask for its details in the first
-   * place.
-   */
-  const [detailsClosed, setDetailsClosed] = useState(false);
-  /*
-   * A selection that lands while the inspector is folded does not unfold it
-   * — that was the "panel keeps popping" the sidebar was accused of. It
-   * lights the section's header instead, until it is opened.
-   */
-  const [inspectorGlow, setInspectorGlow] = useState(false);
-  useEffect(() => {
-    if (selected && detailsClosed) setInspectorGlow(true);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [selected]);
-
-  const selection = useMemo(() => {
-    if (!selected) return null;
-    if (selected.startsWith('@dir:')) {
-      const dir = selected.slice(5);
-      const members = [...fullNodesRef.current.values()].filter((n) => n.id.startsWith(`${dir}/`));
-      return { type: 'dir' as const, dir, members };
-    }
-    const sym = parseSymbolNode(selected);
-    if (sym) {
-      const sg = symbolGraphs.get(sym.path);
-      return {
-        type: 'symbol' as const,
-        ...sym,
-        info: sg?.symbols.find((s) => s.name === sym.symbol) ?? null,
-      };
-    }
-    return { type: 'file' as const, path: selected };
-  }, [selected, symbolGraphs, graphVersion]); // eslint-disable-line react-hooks/exhaustive-deps
+  // Reuse the same analytics beside the editor and inside the file preview.
+  const fileAnalytics = (path: string) => (
+    <DetailsPanel
+      nodeId={path}
+      gitState={gitStatus?.files[path]}
+      reviewInfo={reviewInfo}
+      changedAt={changedAt}
+      changedBy={changedBy}
+      churn={churn}
+      coverage={coverage[path] ?? null}
+      insights={insights}
+      refreshKey={refreshKey}
+      onOpenFile={openFileWithAnalytics}
+      onOpenDiff={(p, source) => { setPeekFile(null); openDiff(p, source); }}
+      onNewTask={(paths) => { setPeekFile(null); taskFromSelection(paths); }}
+      onSelect={openFileWithAnalytics}
+      onApprove={approve}
+      onRestored={() => {
+        setRefreshKey((k) => k + 1);
+        toast('File reverted to snapshot', 'success');
+      }}
+    />
+  );
 
   if (!project) {
     return (
@@ -2371,7 +2376,7 @@ export function App() {
       style={
         {
           '--terminal-h': `${terminalHeight}px`,
-          /* --details-w is gone: the inspector lives in the left sidebar now,
+          /* Analytics accompanies the editor; alerts remain anchored to the graph,
              so the corner alerts always own the right edge */
           '--overlay-top': `${overlayTop}px`,
         } as React.CSSProperties
@@ -2578,7 +2583,7 @@ export function App() {
                   onClick={() => doCreateFile(selectedDir)}
                   data-testid="explorer-new-file"
                 >
-                  ⊞
+                  <IconNewFile size={16} />
                 </button>
                 <button
                   className="ehbtn"
@@ -2587,7 +2592,7 @@ export function App() {
                   onClick={() => doCreateFolder(selectedDir)}
                   data-testid="explorer-new-folder"
                 >
-                  ⊕
+                  <IconNewFolder size={16} />
                 </button>
                 <button
                   className="ehbtn"
@@ -2596,7 +2601,7 @@ export function App() {
                   onClick={() => treeRef.current?.collapseAll()}
                   data-testid="explorer-collapse-all"
                 >
-                  ⇱
+                  <IconCollapseAll size={16} />
                 </button>
                 <button
                   className="ehbtn"
@@ -2608,7 +2613,7 @@ export function App() {
                   }}
                   data-testid="explorer-refresh"
                 >
-                  ↻
+                  <IconRelayout size={16} />
                 </button>
               </div>
               {fileTree && (
@@ -2620,205 +2625,31 @@ export function App() {
                   clusterColors={clusterColorMap}
                   selected={selected}
                   selectedPaths={selectedPaths}
-                  onOpenFile={openFile}
+                  onOpenFile={openFileWithAnalytics}
+                  onSelectPaths={(paths) => setSelectedPaths(new Set(paths))}
+                  onBeforeMove={(paths) => {
+                    const dirty = tabs.some((tab) => dirtyTabs.has(tab.key) && paths.some((p) => tab.path === p || tab.path.startsWith(p + '/')));
+                    if (dirty) toast('Save or close unsaved files before moving them', 'warn');
+                    return !dirty;
+                  }}
+                  onMoved={(paths, target) => {
+                    for (const tab of tabs) if (paths.some((p) => tab.path === p || tab.path.startsWith(p + '/'))) closeTabNow(tab.key);
+                    setSelectedPaths(new Set());
+                    setSelected(null);
+                    treeRef.current?.reveal([target, paths[0]?.split('/').pop()].filter(Boolean).join('/'));
+                  }}
+                  onRename={doRename}
+                  onDelete={doDelete}
+                  onNotice={(message, error) => toast(message, error ? 'warn' : 'success')}
                   onSelect={(p) => {
                     selectSingle(p);
-                    openFile(p);
+                    if (!idToEntry(p).isDir) openFile(p);
                   }}
                   onToggleSelect={toggleSelect}
                   onRowContextMenu={({ x, y, path }) =>
                     openContextMenu({ x, y, id: path === '' ? null : path })
                   }
                 />
-              )}
-              {/*
-                The inspector: what used to be the right-hand details panel,
-                as a permanent section of the sidebar. It is always here, in
-                this slot, populated or not — so it never appears somewhere
-                new, and a selection made while it is folded lights its
-                header rather than unfolding it under your pointer.
-              */}
-              <section
-                className={`side-inspector${detailsClosed ? ' folded' : ''}${inspectorGlow && detailsClosed ? ' glow' : ''}`}
-                data-testid="side-inspector"
-              >
-                <button
-                  className="side-sec-head inspector-head"
-                  aria-expanded={!detailsClosed}
-                  title={detailsClosed ? 'Unfold the inspector' : 'Fold the inspector away'}
-                  onClick={() => {
-                    setDetailsClosed((v) => !v);
-                    setInspectorGlow(false);
-                  }}
-                  data-testid="inspector-toggle"
-                >
-                  <span className="side-sec-chevron">{detailsClosed ? '▸' : '▾'}</span>
-                  Inspector
-                  {selection ? (
-                    <span className="mono inspector-name">
-                      {selection.type === 'dir'
-                        ? `${selection.dir}/`
-                        : selection.type === 'symbol'
-                          ? selection.symbol
-                          : selection.path.split('/').pop()}
-                    </span>
-                  ) : (
-                    <span className="inspector-none">nothing selected</span>
-                  )}
-                </button>
-                {!detailsClosed && selection && (
-                  <div className="details-panel side-info">
-                  {/*
-                    A way out that is not "go and click the empty canvas".
-                    The panel opens by selecting something, and until now that
-                    was also the only way to close it — so dismissing it meant
-                    giving up your selection, which is a different intention
-                    entirely. Pinned rather than in the flow so it works for a
-                    file and a directory without either of them growing a
-                    header of its own.
-                  */}
-                  <button
-                    className="details-close"
-                    title="Close this panel — the node stays selected"
-                    aria-label="Close details"
-                    onClick={() => setDetailsClosed(true)}
-                    data-testid="details-close"
-                  >
-                    ✕
-                  </button>
-                  {selection.type === 'file' && (
-                    <DetailsPanel
-                      nodeId={selection.path}
-                      gitState={gitStatus?.files[selection.path]}
-                      reviewInfo={reviewInfo}
-                      changedAt={changedAt}
-                      changedBy={changedBy}
-                      churn={churn}
-                      coverage={coverage[selection.path] ?? null}
-                      insights={insights}
-                      refreshKey={refreshKey}
-                      isExpanded={expandedFiles.has(selection.path)}
-                      onOpenFile={openFile}
-                      onOpenDiff={openDiff}
-                      onNewTask={taskFromSelection}
-                      onSelect={(p) => {
-                        setSelected(p);
-                        graphRef.current?.focusNode(p);
-                      }}
-                      onApprove={approve}
-                      onExpandSymbols={(p) => void expandFile(p)}
-                      onCollapseSymbols={collapseFile}
-                      onRestored={() => {
-                        setRefreshKey((k) => k + 1);
-                        toast('File reverted to snapshot', 'success');
-                      }}
-                    />
-                  )}
-                  {selection.type === 'dir' && (
-                    <div data-testid="dir-details">
-                      <h3>▣ {selection.dir}/</h3>
-                      <div className="kv">
-                        <span className="k">files</span>
-                        <span>{selection.members.length}</span>
-                        <span className="k">lines</span>
-                        <span>{selection.members.reduce((a, n) => a + n.loc, 0)}</span>
-                        <span className="k">in cycles</span>
-                        <span>{selection.members.filter((n) => n.cycleId !== null).length}</span>
-                        <span className="k">untested</span>
-                        <span>
-                          {
-                            selection.members.filter((n) => !n.doc && !n.isTest && n.testedBy === 0)
-                              .length
-                          }
-                        </span>
-                      </div>
-                      <div className="actions">
-                        <button className="btn primary" onClick={() => toggleDir(selection.dir)}>
-                          Expand directory
-                        </button>
-                      </div>
-                    </div>
-                  )}
-                  {selection.type === 'symbol' && (
-                    <div data-testid="symbol-details">
-                      <h3 className="mono">
-                        {selection.symbol}
-                        <span className="muted"> · {selection.info?.kind ?? 'symbol'}</span>
-                      </h3>
-                      <div className="kv">
-                        <span className="k">file</span>
-                        <span className="mono">{selection.path}</span>
-                        <span className="k">line</span>
-                        <span>{selection.info?.line ?? '?'}</span>
-                        <span className="k">length</span>
-                        <span>{selection.info?.loc ?? '?'} lines</span>
-                        <span className="k">exported</span>
-                        <span>{selection.info?.exported ? 'yes' : 'no'}</span>
-                      </div>
-                      <div className="actions">
-                        <button
-                          className="btn primary"
-                          onClick={() => openFile(selection.path, selection.info?.line)}
-                        >
-                          Open at line
-                        </button>
-                        <button className="btn" onClick={() => collapseFile(selection.path)}>
-                          Collapse symbols
-                        </button>
-                      </div>
-                    </div>
-                  )}
-                  </div>
-                )}
-                {!detailsClosed && !selection && (
-                  <div className="inspector-empty">
-                    Select a file on the graph or in the tree — its metrics, risk and dependents land here.
-                  </div>
-                )}
-              </section>
-              {/*
-                Below the tree, deliberately: git status lands whenever the
-                watcher does, and a section that pops in above the tree
-                shifts every row under the pointer mid-click.
-              */}
-              {gitStatus && Object.keys(gitStatus.files).length > 0 && (
-                <details className="side-changed" open data-testid="side-changed">
-                  <summary className="side-sec-head">
-                    Changed
-                    <span className="side-sec-count">{Object.keys(gitStatus.files).length}</span>
-                  </summary>
-                  <div className="side-changed-list">
-                    {Object.entries(gitStatus.files).slice(0, 30).map(([p, st]) => (
-                      <div
-                        key={p}
-                        className="side-changed-row"
-                        role="button"
-                        tabIndex={0}
-                        title={`${p} — ${st}. Click to select on the graph, double-click to open.`}
-                        onClick={() => selectSingle(p)}
-                        onDoubleClick={() => openFile(p)}
-                        onKeyDown={(e) => e.key === 'Enter' && selectSingle(p)}
-                      >
-                        <span className="dot" style={{ background: STATE_COLOR[st] }} />
-                        <span className="scr-name">{p.split('/').pop()}</span>
-                        <button
-                          className="row-btn"
-                          title="Diff this file against git HEAD"
-                          onClick={(e) => {
-                            e.stopPropagation();
-                            openDiff(p, 'head');
-                          }}
-                        >
-                          diff
-                        </button>
-                        <span className="scr-state">{st[0].toUpperCase()}</span>
-                      </div>
-                    ))}
-                    {Object.keys(gitStatus.files).length > 30 && (
-                      <div className="scr-more">+{Object.keys(gitStatus.files).length - 30} more</div>
-                    )}
-                  </div>
-                </details>
               )}
               {/*
                 Structure: the folders bar, docked. It used to float over the
@@ -2833,16 +2664,16 @@ export function App() {
                     lens={lens}
                     emptyNote={null}
                     clusters={stats.clusters}
-                    onToggleDir={toggleDir}
-                    onFoldAll={() => updateCollapsed(new Set(allClusters))}
-                    onUnfoldAll={() => updateCollapsed(new Set())}
+                    onToggleDir={(dir) => { setActiveTab('graph'); toggleDir(dir); }}
+                    onFoldAll={() => { setActiveTab('graph'); updateCollapsed(new Set(allClusters)); }}
+                    onUnfoldAll={() => { setActiveTab('graph'); updateCollapsed(new Set()); }}
                     collapsed={legendCollapsed}
                     onToggleCollapsed={() => setLegendCollapsed((on) => !on)}
                   />
                 </div>
               )}
             </div>
-            <Splitter direction="horizontal" onDrag={(x) => setSidebarWidth(Math.max(140, Math.min(500, x)))} />
+            <Splitter direction="horizontal" onDrag={(x) => setSidebarWidth(Math.max(220, Math.min(500, x)))} />
           </>
         )}
 
@@ -3030,7 +2861,7 @@ export function App() {
                     onToggleSelect={toggleSelect}
                     onBoxSelect={boxSelect}
                     onNodeContextMenu={openContextMenu}
-                    onOpenFile={openFile}
+                    onOpenFile={openFileWithAnalytics}
                     onPeekFile={setPeekFile}
                     onToggleDir={toggleDir}
                     onStats={setStats}
@@ -3364,7 +3195,7 @@ ${l.reading}`}
                           onToggleSelect={toggleSelect}
                           onBoxSelect={boxSelect}
                           onNodeContextMenu={openContextMenu}
-                          onOpenFile={openFile}
+                          onOpenFile={openFileWithAnalytics}
                           onToggleDir={toggleDir}
                           onStats={noopStats}
                         />
@@ -3428,7 +3259,11 @@ ${l.reading}`}
               </div>
             </div>
 
-            {/* the details panel lives in the left sidebar now — see .side-info */}
+            {analyticsPath && activeTab === `file:${analyticsPath}` && (
+              <FileAnalytics onClose={() => setAnalyticsPath(null)}>
+                {fileAnalytics(analyticsPath)}
+              </FileAnalytics>
+            )}
           </div>
 
           {showTimeline && (
@@ -3464,6 +3299,9 @@ ${l.reading}`}
       </div>
 
       <div className="statusbar" data-testid="statusbar">
+        {(indexing.active || indexing.error) && <span className="item" role="status" title={indexing.error}>
+          {indexing.error ? 'Indexing failed ? reopen project to retry' : 'Indexing changes?'}
+        </span>}
         <span className="item">{gitStatus?.isRepo ? `⎇ ${gitStatus.branch}` : 'no git repo'}</span>
         <span
           className="item"
@@ -3535,6 +3373,7 @@ ${l.reading}`}
       {peekFile !== null && (
         <FilePeek
           path={peekFile}
+          analytics={<FileAnalytics embedded>{fileAnalytics(peekFile)}</FileAnalytics>}
           onOpenFile={openFile}
           onPeek={setPeekFile}
           onClose={() => setPeekFile(null)}

@@ -16,3 +16,8 @@ await build({ ...common, entryPoints: ['electron/preload.ts'], outfile: 'dist-el
 // the browser server: same backend, no Electron, so `electron` stays external
 // only because nothing in this graph reaches it
 await build({ ...common, entryPoints: ['server/index.ts'], outfile: 'dist-server/index.cjs' });
+
+// Each bundled host resolves its sibling worker inside the installed app.
+for (const target of ['dist-electron', 'dist-server']) {
+  await build({ ...common, entryPoints: ['electron/index-worker.ts'], outfile: `${target}/index-worker.cjs` });
+}

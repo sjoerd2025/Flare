@@ -1306,7 +1306,7 @@ export const CanvasView = forwardRef<GraphViewHandle, CanvasProps>(function Canv
                       is a column, and a mark inside it would sit above the
                       filename rather than beside it */}
                   {doc && (
-                    <span className="gdoc" title="a document — double-click to read it here">
+                    <span className="gdoc" title={file?.lang === 'md' ? 'Document: double-click to read' : 'Repository file: double-click to open'}>
                       ¶
                     </span>
                   )}

@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from 'react';
+import { useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
 import { parseMarkdown } from '../../shared/markdown';
 import { previewKindFor, resolveRelative } from '../../shared/preview';
 import { api } from '../api';
@@ -6,6 +6,7 @@ import { languageForPath, monaco } from '../monacoSetup';
 import { Markdown } from './Markdown';
 
 interface Props {
+  analytics?: ReactNode;
   path: string;
   /** open it in the editor for real — the peek gets out of the way first */
   onOpenFile(path: string): void;
@@ -34,7 +35,7 @@ interface Props {
  * dismissed with a keystroke: there is never unsaved work inside it, so it
  * never has to ask.
  */
-export function FilePeek({ path, onOpenFile, onClose, onPeek }: Props) {
+export function FilePeek({ path, onOpenFile, onClose, onPeek, analytics }: Props) {
   const kind = previewKindFor(path);
   const [source, setSource] = useState<string | null>(null);
   const [dataUrl, setDataUrl] = useState<string | null | undefined>(undefined);
@@ -146,14 +147,16 @@ export function FilePeek({ path, onOpenFile, onClose, onPeek }: Props) {
       }}
     >
       <div
-        className={`modal file-peek${kind === null ? ' code' : ''}`}
+        className={`file-peek-shell${analytics ? ' with-analytics' : ''}`}
         data-testid="file-peek"
         role="dialog"
         aria-modal="true"
         aria-label={`${name} — preview`}
         tabIndex={-1}
         ref={dialog}
+        onMouseDown={(event) => { if (event.target === event.currentTarget) onClose(); }}
       >
+        <div className={`modal file-peek${kind === null ? ' code' : ''}`}>
         <div className="file-peek-head">
           <span className="file-peek-mark" aria-hidden="true">
             {mark}
@@ -179,6 +182,7 @@ export function FilePeek({ path, onOpenFile, onClose, onPeek }: Props) {
           </button>
         </div>
 
+        <div className="file-peek-content">
         <div className="file-peek-body" ref={body} data-testid="file-peek-body">
           {kind === 'image' ? (
             dataUrl === undefined ? (
@@ -209,6 +213,9 @@ export function FilePeek({ path, onOpenFile, onClose, onPeek }: Props) {
             <ReadOnlyCode path={path} source={source} />
           )}
         </div>
+        </div>
+        </div>
+        {analytics}
       </div>
     </div>
   );

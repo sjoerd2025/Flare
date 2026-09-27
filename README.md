@@ -524,6 +524,11 @@ It uploads to a **draft** release, so nothing is public until the artifacts are
 all there and someone has looked at them. The title bar is platform-aware:
 custom controls on Windows/Linux, native inset traffic lights on macOS.
 
+Windows CI signing uses SignPath: manual dry runs use `test-signing`, while
+release builds require `release-signing`. The Foundation test setup and required
+GitHub secret are documented in [Windows signing](docs/windows-signing.md).
+Production signing remains pending SignPath's setup review and certificate issuance.
+
 On Windows, WSL2 is enough to test the Linux build properly: WSLg supplies a
 display, so the desktop suite runs against real Electron and the AppImage
 actually boots. Work inside the WSL filesystem rather than `/mnt/c` — `npm ci`

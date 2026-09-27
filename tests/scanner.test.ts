@@ -63,11 +63,27 @@ describe('scanProject', () => {
 });
 
 describe('parseFileFromDisk', () => {
-  it('parses a code file and returns null for non-code', () => {
+  it('parses code and repository text files', () => {
     write('x.ts', `import './y';`);
     write('notes.txt', 'hello');
     expect(parseFileFromDisk(tmp, 'x.ts')?.imports.map((d) => d.spec)).toEqual(['./y']);
-    expect(parseFileFromDisk(tmp, 'notes.txt')).toBeNull();
+    expect(parseFileFromDisk(tmp, 'notes.txt')).toMatchObject({ lang: 'other', loc: 1 });
     expect(parseFileFromDisk(tmp, 'missing.ts')).toBeNull();
   });
 });
+
+ it('includes configuration, SQL, extensionless, binary and large files without reading binary as code', () => {
+   for (const name of ['.env', '.env.local', 'schema.sql', 'notes.txt', 'Dockerfile', 'Cargo.toml']) write(name, 'hello');
+   fs.writeFileSync(path.join(tmp, 'asset.png'), Buffer.from([0, 1, 2, 3]));
+   write('large.txt', 'x'.repeat(1_600_000));
+   const scan = scanProject(tmp);
+   expect(scan.parsed.map((f) => f.path).sort()).toEqual(scan.allFiles.sort());
+   expect(scan.parsed.find((f) => f.path === 'asset.png')).toMatchObject({ lang: 'other', loc: 0, complexity: 0 });
+   expect(scan.parsed.find((f) => f.path === 'large.txt')?.loc).toBe(0);
+ });
+
+ it('continues to exclude explicitly ignored environment files', () => {
+   write('.gitignore', '.env');
+   write('.env', 'SECRET=value');
+   expect(scanProject(tmp).parsed.some((f) => f.path === '.env')).toBe(false);
+ });

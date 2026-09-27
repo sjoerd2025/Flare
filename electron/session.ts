@@ -1,3 +1,6 @@
+import { ProjectIndexer } from './services/projectIndexer';
+import { ChangeQueue } from './services/changeQueue';
+import { transferFiles, importFile } from '../shared/fileOperations';
 import * as crypto from 'node:crypto';
 import * as fs from 'node:fs';
 import {
@@ -12,7 +15,7 @@ import {
 } from '../shared/search';
 import * as path from 'node:path';
 import { GraphBuilder } from '../shared/graph';
-import { buildIgnore, isIgnored, parseFileFromDisk, scanProject } from '../shared/scanner';
+import { buildIgnore, isIgnored, scanProject } from '../shared/scanner';
 import {
   parseJsonc,
   tsPathsFromConfig,
@@ -20,14 +23,13 @@ import {
   type ResolverOptions,
   type TsPathMapping,
 } from '../shared/resolver';
-import { CODE_EXTENSIONS } from '../shared/parser';
-import { extname, toPosix } from '../shared/paths';
+import { toPosix } from '../shared/paths';
 import { buildSymbolGraph } from '../shared/symbols';
 import { parseLcov, resolveCoverage, type CoverageMap } from '../shared/coverage';
 import { computeInsights, type Insights } from '../shared/insights';
 import { imageMime } from '../shared/preview';
 import { classifyCommand, detectOutcome } from '../shared/commands';
-import { detectSmells, type FileChange } from '../shared/smells';
+import { type FileChange } from '../shared/smells';
 import {
   lastGreen,
   verificationFor,
@@ -49,7 +51,7 @@ import {
   type RecordedIntent,
   type TaskClaim,
 } from '../shared/attribution';
-import { changedRanges, type BurstEdit } from '../shared/conflicts';
+import { type BurstEdit } from '../shared/conflicts';
 import { AgentRegistry, type AgentsSnapshot } from './services/roster';
 import {
   auditSummary,
@@ -74,6 +76,7 @@ import { ProjectStore } from './services/store';
 import type { LoggedCommand } from './services/agents';
 
 export interface SessionEvents {
+  onIndexing?: (state: { active: boolean; error?: string }) => void;
   onGraphPatch: (patch: GraphPatch) => void;
   onFilesChanged: (event: ChangeEvent) => void;
   onGitStatus: (status: import('../shared/types').GitStatus) => void;
@@ -162,6 +165,11 @@ export class ProjectSession {
   private shadowTimer: NodeJS.Timeout | null = null;
   private pendingSnapshotFiles = new Set<string>();
   private disposed = false;
+  private indexer: ProjectIndexer | null = null;
+  private changes = new ChangeQueue(
+    (batch) => this.handleBatch(batch),
+    (error) => { if (!this.disposed) this.events.onIndexing?.({ active: false, error: String(error) }); },
+  );
 
   // ---- activity log: bursts, their evidence and their smells ----
   private bursts: ChangeBurst[] = [];
@@ -294,13 +302,16 @@ export class ProjectSession {
 
   /** Initial scan + watcher + shadow init. Returns full project info. */
   async open(): Promise<ProjectInfo> {
-    const scan = scanProject(this.root);
+    this.indexer = new ProjectIndexer(this.root);
+    const scan = await this.indexer.scan();
     for (const f of scan.allFiles) this.gitTrackedAtOpen.add(f);
     this.fileTree = scan.fileTree;
     // workspace packages can only be found once the tree has been walked, and
     // they change which imports resolve — so settle the options before building
-    this.builder.setResolverOptions(this.loadResolverOptions(scan.allFiles));
-    const graph = this.builder.setAll(scan.parsed);
+    const options = this.loadResolverOptions(scan.allFiles);
+    this.builder.setResolverOptions(options);
+    const graph = await this.indexer.initialize(scan.parsed, options);
+    this.builder.adoptAll(scan.parsed, graph);
     const gitStatus = await this.git.status();
     const now = Date.now();
     for (const p of Object.keys(gitStatus.files)) this.changedAt[p] = now;
@@ -311,7 +322,11 @@ export class ProjectSession {
     void this.shadow.snapshot('session start');
 
     const ig = this.ignore ?? (this.ignore = buildIgnore(this.root));
-    this.watcher = new WatcherService(this.root, ig, (batch) => this.handleBatch(batch));
+    this.watcher = new WatcherService(this.root, ig, (batch) => {
+      if (this.gitTimer) clearTimeout(this.gitTimer);
+      if (this.shadowTimer) clearTimeout(this.shadowTimer);
+      this.changes.enqueue(batch);
+    });
     this.watcher.start();
 
     this.knownFiles = new Set(scan.allFiles);
@@ -393,38 +408,48 @@ export class ProjectSession {
     this.agents.noteCall(callerId, { task: title });
   }
 
-  private handleBatch(batch: { changed: string[]; removed: string[] }): void {
+  private async handleBatch(batch: { changed: string[]; removed: string[] }): Promise<void> {
     if (this.disposed) return;
     const now = Date.now();
     const attributed = this.attributeWrite([...batch.changed, ...batch.removed]);
     const agent = attributed.agent;
     const burst = this.openBurst(attributed, now);
     const states = this.burstStates.get(burst.id)!;
-
-    const parsedChanges = [];
-    let treeDirty = batch.removed.length > 0;
+    this.events.onIndexing?.({ active: true });
+    const treeDirty = batch.removed.length > 0 || batch.changed.some((rel) => !this.knownFiles.has(rel));
+    const indexed = await this.indexer!.update(batch, treeDirty);
+    if (this.disposed) return;
+    batch = { changed: indexed.changed, removed: indexed.removed };
+    const parsedByPath = new Map(indexed.parsed.map((file) => [file.path, file]));
+    const burstChanged = new Set(burst.changed);
+    const burstRemoved = new Set(burst.removed);
+    let sliceStarted = Date.now();
     /* files this agent had not already written in this burst — the roster
        counts files touched, not writes, so saving one file twice is one file */
     let firstWrites = 0;
-    for (const rel of batch.changed) {
+    for (const [index, rel] of batch.changed.entries()) {
       this.changedAt[rel] = now;
       this.knownFiles.add(rel);
-      const parsed = parseFileFromDisk(this.root, rel);
-      if (parsed) parsedChanges.push(parsed);
-      this.trackFileState(states, rel, parsed, false);
-      if (!burst.changed.includes(rel)) {
+      const parsed = parsedByPath.get(rel) ?? null;
+      this.trackFileState(states, rel, parsed, false, indexed.texts[index]);
+      if (!burstChanged.has(rel)) {
+        burstChanged.add(rel);
         burst.changed.push(rel);
         firstWrites++;
       }
-      treeDirty = true;
       this.pendingSnapshotFiles.add(rel);
+      if (Date.now() - sliceStarted >= 8) {
+        await new Promise<void>((resolve) => setImmediate(resolve));
+        if (this.disposed) return;
+        sliceStarted = Date.now();
+      }
     }
     this.agents.noteWrites(attributed.agentId, firstWrites);
     for (const rel of batch.removed) {
       this.changedAt[rel] = now;
       this.knownFiles.delete(rel);
       this.trackFileState(states, rel, null, true);
-      if (!burst.removed.includes(rel)) burst.removed.push(rel);
+      if (!burstRemoved.has(rel)) { burstRemoved.add(rel); burst.removed.push(rel); }
       this.pendingSnapshotFiles.add(rel);
     }
     burst.endedAt = now;
@@ -432,35 +457,47 @@ export class ProjectSession {
     const degreeBefore = new Map<string, number>();
     for (const n of this.builder.getGraph().nodes) degreeBefore.set(n.id, n.inDegree);
 
-    const removedCode = batch.removed.filter((r) => CODE_EXTENSIONS.has(extname(r).toLowerCase()));
-    const patch = this.builder.apply(parsedChanges, removedCode);
+    const patch = indexed.patch;
+    this.builder.adoptPatch(indexed.parsed, batch.removed, patch);
+    this.insightsCache = null;
     this.recordDegreeDelta(burst.id, degreeBefore);
     if (
       patch.addedNodes.length ||
       patch.updatedNodes.length ||
       patch.removedNodeIds.length ||
       patch.addedEdges.length ||
-      patch.removedEdges.length
+      patch.removedEdges.length ||
+      patch.updatedEdges.length
     ) {
       this.events.onGraphPatch(patch);
     }
     for (const rel of [...batch.changed, ...batch.removed]) this.changedBy[rel] = agent;
     this.events.onFilesChanged({ changed: batch.changed, removed: batch.removed, time: now, agent });
 
-    if (treeDirty) this.refreshTree();
+    if (indexed.tree) {
+      this.fileTree = indexed.tree;
+      this.events.onTreeChanged(this.fileTree);
+    }
+    this.events.onIndexing?.({ active: false });
 
     if (this.gitTimer) clearTimeout(this.gitTimer);
     this.gitTimer = setTimeout(() => {
+      if (this.changes.busy || this.disposed) return;
       void this.git.status().then((s) => {
         if (!this.disposed) this.events.onGitStatus(s);
       });
     }, 400);
 
     if (this.shadowTimer) clearTimeout(this.shadowTimer);
-    this.shadowTimer = setTimeout(() => void this.takeSnapshot(), 1500);
+    this.shadowTimer = setTimeout(() => {
+      void this.takeSnapshot().catch((error) => {
+        if (!this.disposed) this.events.onIndexing?.({ active: false, error: String(error) });
+      });
+    }, 1500);
   }
 
   private async takeSnapshot(): Promise<void> {
+    if (this.changes.busy || this.disposed) return;
     const files = [...this.pendingSnapshotFiles];
     this.pendingSnapshotFiles.clear();
     if (files.length === 0) return;
@@ -533,8 +570,9 @@ export class ProjectSession {
     rel: string,
     parsed: import('../shared/types').ParsedFile | null,
     removed: boolean,
+    indexedText?: string | null,
   ): void {
-    const text = removed ? null : this.readFileForDiff(rel);
+    const text = removed ? null : indexedText !== undefined ? indexedText : this.readFileForDiff(rel);
     const previous = this.lastKnown.get(rel);
     const existing = states.get(rel);
     if (existing) {
@@ -588,6 +626,8 @@ export class ProjectSession {
         if (beforeText === undefined) {
           // first time we have seen this file change — ask git what it was
           beforeText = await this.git.showHead(path).catch(() => null);
+          st.beforeText = beforeText;
+          if (this.disposed) return;
         }
         files.push({
           path,
@@ -600,7 +640,6 @@ export class ProjectSession {
         });
       }
       const graph = this.builder.getGraph();
-      const nodes = new Map(graph.nodes.map((n) => [n.id, n]));
       const degreeBefore = this.burstDegree.get(burst.id) ?? new Map<string, number>();
       const degreeDelta: { path: string; before: number; after: number }[] = [];
       for (const n of graph.nodes) {
@@ -609,13 +648,8 @@ export class ProjectSession {
           degreeDelta.push({ path: n.id, before, after: n.inDegree });
         }
       }
-      burst.smells = detectSmells({
-        files,
-        nodes,
-        importersOf: (p) => this.builder.importersOf(p).map((i) => i.importer),
-        degreeDelta,
-        hasTests: graph.nodes.some((n) => n.isTest),
-      });
+      if (this.indexer) burst.smells = await this.indexer.smells(files, degreeDelta);
+
     }
     this.recomputeVerification();
     if (!this.disposed) this.events.onActivity(this.bursts);
@@ -693,23 +727,15 @@ export class ProjectSession {
    * the second one wrote *over* the first. That difference is the whole
    * severity gap between a note and an alarm, so it is worth an extra channel.
    */
-  getBurstEdits(): BurstEdit[] {
-    const out: BurstEdit[] = [];
+  async getBurstEdits(): Promise<BurstEdit[]> {
+    const changes: { burstId: string; path: string; before: string | null; after: string | null; added: boolean }[] = [];
     for (const burst of this.bursts) {
-      const states = this.burstStates.get(burst.id);
-      if (!states) continue;
-      for (const [path, state] of states) {
-        const before = state.beforeText === undefined ? null : state.beforeText;
-        const ranges = changedRanges(before, state.afterText);
-        // `added` the same way finalizeBurst reads it: the flag alone is true
-        // for a file we simply had not seen yet, which is not the same as one
-        // that did not exist
-        if (ranges.length > 0) {
-          out.push({ burstId: burst.id, path, ranges, added: state.added && before === null });
-        }
+      for (const [path, state] of this.burstStates.get(burst.id) ?? []) {
+        const before = state.beforeText ?? null;
+        changes.push({ burstId: burst.id, path, before, after: state.afterText, added: state.added && before === null });
       }
     }
-    return out;
+    return this.indexer ? this.indexer.edits(changes) : [];
   }
 
   // ------------------------------------------------------------------
@@ -922,7 +948,7 @@ export class ProjectSession {
     if (!this.churnCache) this.churnCache = await this.git.churn();
     const snapshots = await this.shadow.timeline(300);
     const graph = this.builder.getGraph();
-    const value = computeInsights({
+    const input = {
       nodes: graph.nodes,
       edges: graph.edges,
       churn: this.churnCache,
@@ -931,7 +957,8 @@ export class ProjectSession {
       changedBy: this.changedBy,
       review: this.store.review,
       snapshots,
-    });
+    };
+    const value = this.indexer ? await this.indexer.insights(input) : computeInsights(input);
     this.insightsCache = { at: Date.now(), value };
     return value;
   }
@@ -1184,6 +1211,22 @@ export class ProjectSession {
     }
   }
 
+  transferFiles(sources: string[], target: string, move: boolean): { error?: string } {
+    try {
+      transferFiles(this.root, sources, target, move);
+      this.refreshTree();
+      return {};
+    } catch (error) { return { error: String(error) }; }
+  }
+
+  importFile(rel: string, base64: string): { error?: string } {
+    try {
+      importFile(this.root, rel, base64);
+      this.refreshTree();
+      return {};
+    } catch (error) { return { error: String(error) }; }
+  }
+
   renameFile(fromRel: string, toRel: string): boolean {
     try {
       const from = this.resolveInRoot(fromRel);
@@ -1231,6 +1274,8 @@ export class ProjectSession {
 
   async dispose(): Promise<void> {
     this.disposed = true;
+    this.changes.dispose();
+    await this.indexer?.dispose();
     this.agents.stop();
     if (this.gitTimer) clearTimeout(this.gitTimer);
     if (this.shadowTimer) clearTimeout(this.shadowTimer);

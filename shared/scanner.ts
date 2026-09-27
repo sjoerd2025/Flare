@@ -2,8 +2,8 @@ import * as fs from 'node:fs';
 import * as path from 'node:path';
 import ignore, { type Ignore } from 'ignore';
 import type { FileTreeNode, ParsedFile } from './types';
-import { CODE_EXTENSIONS, parseFile } from './parser';
-import { extname, toPosix } from './paths';
+import { parseFile } from './parser';
+import { toPosix } from './paths';
 
 const DEFAULT_IGNORES = [
   '.git/',
@@ -43,7 +43,7 @@ export interface ScanResult {
   fileTree: FileTreeNode;
   /** All scanned (non-ignored) files, project-relative posix paths. */
   allFiles: string[];
-  /** Parsed code files. */
+  /** Graph records for every scanned file. */
   parsed: ParsedFile[];
 }
 
@@ -93,15 +93,9 @@ export function scanProject(root: string, options: { parse?: boolean } = {}): Sc
         if (isIgnored(ig, rel, false)) continue;
         allFiles.push(rel);
         files.push({ name: entry.name, path: rel, type: 'file' });
-        if (doParse && CODE_EXTENSIONS.has(extname(rel).toLowerCase())) {
-          try {
-            const stat = fs.statSync(abs);
-            if (stat.size <= MAX_PARSE_BYTES) {
-              parsed.push(parseFile(rel, fs.readFileSync(abs, 'utf8')));
-            }
-          } catch {
-            // unreadable — skip
-          }
+        if (doParse) {
+          const file = parseFileFromDisk(root, rel);
+          if (file) parsed.push(file);
         }
       }
     }
@@ -117,15 +111,17 @@ export function scanProject(root: string, options: { parse?: boolean } = {}): Sc
   };
 }
 
-/** Parse a single file from disk; returns null if unreadable/too big/not code. */
+/** Parse text when bounded; binary and large files still receive graph nodes. */
 export function parseFileFromDisk(root: string, relPath: string): ParsedFile | null {
   const rel = toPosix(relPath);
-  if (!CODE_EXTENSIONS.has(extname(rel).toLowerCase())) return null;
   const abs = path.join(root, rel);
   try {
     const stat = fs.statSync(abs);
-    if (stat.size > MAX_PARSE_BYTES) return null;
-    return parseFile(rel, fs.readFileSync(abs, 'utf8'));
+    if (!stat.isFile()) return null;
+    if (stat.size > MAX_PARSE_BYTES) return { ...parseFile(rel, ''), lang: 'other' };
+    const bytes = fs.readFileSync(abs);
+    if (bytes.includes(0)) return { ...parseFile(rel, ''), lang: 'other' };
+    return parseFile(rel, bytes.toString('utf8'));
   } catch {
     return null;
   }

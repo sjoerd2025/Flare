@@ -1,3 +1,4 @@
+import { IconParentFolder, IconHome, IconFolder, IconChevron } from './icons';
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { api, type DirListing } from '../api';
 import { Spinner } from './Spinner';
@@ -78,14 +79,15 @@ export function FolderPicker({
         <button
           className="btn"
           disabled={!listing?.parent || loading}
-          title="Up one folder"
+          title="Go to the parent folder"
+          aria-label="Parent folder"
           onClick={() => go(listing?.parent ?? undefined)}
           data-testid="picker-up"
         >
-          ↑
+          <IconParentFolder size={16} /> Parent folder
         </button>
-        <button className="btn" title="Home" onClick={() => go(listing?.home)} data-testid="picker-home">
-          Home
+        <button className="btn" title="Go to your home folder" aria-label="Home folder" onClick={() => go(listing?.home)} data-testid="picker-home">
+          <IconHome size={16} /> Home
         </button>
         <input
           className="start-input"
@@ -130,8 +132,10 @@ export function FolderPicker({
               onClick={() => go(dir.path)}
               data-testid={`picker-dir-${dir.name}`}
             >
+              <IconFolder size={16} />
               <span className="picker-name">{dir.name}</span>
               {dir.project && <span className="picker-tag">project</span>}
+              <IconChevron size={14} />
             </div>
           ))
         )}

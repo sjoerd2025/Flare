@@ -8,6 +8,7 @@
 export const EVENT_CHANNELS = [
   'evt:projectOpened',
   'evt:graphPatch',
+  'evt:indexing',
   'evt:filesChanged',
   'evt:gitStatus',
   'evt:treeChanged',

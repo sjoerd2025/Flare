@@ -20,15 +20,12 @@ interface Props {
   insights: Insights | null;
   /** bump to refetch (graph patched / snapshots taken) */
   refreshKey: number;
-  isExpanded: boolean;
   onOpenFile(path: string, line?: number): void;
   onOpenDiff(path: string, source: 'head' | { hash: string }): void;
   onSelect(path: string): void;
   onApprove(path: string): void;
   /** file a board task about these paths */
   onNewTask(paths: string[]): void;
-  onExpandSymbols(path: string): void;
-  onCollapseSymbols(path: string): void;
   onRestored(): void;
 }
 
@@ -42,14 +39,11 @@ export function DetailsPanel({
   coverage,
   insights,
   refreshKey,
-  isExpanded,
   onOpenFile,
   onOpenDiff,
   onSelect,
   onApprove,
   onNewTask,
-  onExpandSymbols,
-  onCollapseSymbols,
   onRestored,
 }: Props) {
   const [details, setDetails] = useState<NodeDetails | null>(null);
@@ -85,7 +79,7 @@ export function DetailsPanel({
 
   return (
     <div data-testid="details-panel">
-      <h3 className="mono">{nodeId}</h3>
+      <div className="analytics-identity"><h3 className="mono">{nodeId}</h3>
       <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap' }}>
         {gitState && (
           <span className="pill" style={{ borderColor: UI_STATUS.warning, color: UI_STATUS.warning }}>
@@ -122,6 +116,9 @@ export function DetailsPanel({
         )}
       </div>
 
+      </div>
+
+      <section className="analytics-overview"><h4>Overview</h4>
       {node?.doc ? (
         /*
          * A document is described, not scored.
@@ -139,7 +136,7 @@ export function DetailsPanel({
           <span>{num(node.loc)}</span>
           <span className="k">churn</span>
           <span>{plural(churn[nodeId] ?? 0, 'commit')}</span>
-          <span className="k" title="Links in this document that point at a file in the project">
+          <span className="k" title="References from this file to other project files">
             links to
           </span>
           <span>{plural(node.outDegree, 'file')}</span>
@@ -238,15 +235,10 @@ export function DetailsPanel({
             </>
           )}
         </div>
-      ) : null}
+      ) : <span className="muted">Loading file information...</span>}
+      </section>
 
-      <div className="actions">
-        <button className="btn primary" onClick={() => onOpenFile(nodeId)}>
-          Open
-        </button>
-        <button className="btn" onClick={() => onOpenDiff(nodeId, 'head')} data-testid="btn-diff-head">
-          Diff vs HEAD
-        </button>
+      <div className="actions analytics-actions">
         {/* the same action the bulk bar offers for a box-selection, so
             "start work on this" is reachable however you got here */}
         <button
@@ -255,17 +247,8 @@ export function DetailsPanel({
           onClick={() => onNewTask([nodeId])}
           data-testid="btn-new-task"
         >
-          New task
+          New task on this file
         </button>
-        {isExpanded ? (
-          <button className="btn" onClick={() => onCollapseSymbols(nodeId)} data-testid="btn-collapse-symbols">
-            Collapse symbols
-          </button>
-        ) : (
-          <button className="btn" onClick={() => onExpandSymbols(nodeId)} data-testid="btn-expand-symbols">
-            Expand symbols
-          </button>
-        )}
         {unreviewed && (
           <button
             className="btn warn"

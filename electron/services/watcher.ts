@@ -17,6 +17,9 @@ export class WatcherService {
   private changed = new Set<string>();
   private removed = new Set<string>();
   private timer: NodeJS.Timeout | null = null;
+  private closed = false;
+  private pendingSince = 0;
+  private scanning = new Set<string>();
 
   constructor(
     private root: string,
@@ -40,7 +43,7 @@ export class WatcherService {
       .on('add', (p) => this.enqueue(p, 'changed'))
       .on('change', (p) => this.enqueue(p, 'changed'))
       .on('unlink', (p) => this.enqueue(p, 'removed'))
-      .on('addDir', (p) => this.enqueueNewDir(p))
+      .on('addDir', (p) => void this.enqueueNewDir(p))
       .on('error', () => {
         // transient FS errors (locked files etc.) — safe to ignore
       });
@@ -57,25 +60,28 @@ export class WatcherService {
    * the directory ourselves closes the window rather than waiting it out;
    * anything chokidar does report later is deduplicated by the pending set.
    */
-  private enqueueNewDir(absPath: string, depth = 0): void {
-    if (depth > 6) return;
-    let entries: fs.Dirent[];
+  private async enqueueNewDir(absPath: string, depth = 0): Promise<void> {
+    if (this.closed || depth > 6 || this.scanning.has(absPath)) return;
+    this.scanning.add(absPath);
     try {
-      entries = fs.readdirSync(absPath, { withFileTypes: true });
-    } catch {
-      return; // vanished again, or unreadable — the watcher will cope
-    }
-    for (const entry of entries) {
-      const child = path.join(absPath, entry.name);
-      const rel = toPosix(path.relative(this.root, child));
-      if (rel === '' || rel.startsWith('..')) continue;
-      if (this.ig.ignores(rel) || this.ig.ignores(`${rel}/`)) continue;
-      if (entry.isDirectory()) this.enqueueNewDir(child, depth + 1);
-      else if (entry.isFile()) this.enqueue(child, 'changed');
-    }
+      const entries = await fs.promises.readdir(absPath, { withFileTypes: true });
+      let count = 0;
+      for (const entry of entries) {
+        if (this.closed) return;
+        const child = path.join(absPath, entry.name);
+        const rel = toPosix(path.relative(this.root, child));
+        if (rel === '' || rel.startsWith('..')) continue;
+        if (this.ig.ignores(rel) || this.ig.ignores(`${rel}/`)) continue;
+        if (entry.isDirectory()) await this.enqueueNewDir(child, depth + 1);
+        else if (entry.isFile()) this.enqueue(child, 'changed');
+        if (++count % 128 === 0) await new Promise<void>((resolve) => setImmediate(resolve));
+      }
+    } catch { /* Directory may vanish during a checkout. */ }
+    finally { this.scanning.delete(absPath); }
   }
 
   private enqueue(absPath: string, kind: 'changed' | 'removed'): void {
+    if (this.closed) return;
     const rel = toPosix(path.relative(this.root, absPath));
     if (rel === '' || rel.startsWith('..')) return;
     if (kind === 'changed') {
@@ -85,12 +91,14 @@ export class WatcherService {
       this.removed.add(rel);
       this.changed.delete(rel);
     }
+    if (!this.pendingSince) this.pendingSince = Date.now();
     if (this.timer) clearTimeout(this.timer);
-    this.timer = setTimeout(() => this.flush(), this.debounceMs);
+    this.timer = setTimeout(() => this.flush(), Math.min(this.debounceMs, Math.max(0, 1000 - (Date.now() - this.pendingSince))));
   }
 
   private flush(): void {
     this.timer = null;
+    this.pendingSince = 0;
     if (this.changed.size === 0 && this.removed.size === 0) return;
     const batch: WatchBatch = { changed: [...this.changed], removed: [...this.removed] };
     this.changed.clear();
@@ -99,6 +107,7 @@ export class WatcherService {
   }
 
   async dispose(): Promise<void> {
+    this.closed = true;
     if (this.timer) clearTimeout(this.timer);
     await this.watcher?.close();
     this.watcher = null;

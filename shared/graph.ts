@@ -67,7 +67,24 @@ export class GraphBuilder {
     return out;
   }
 
-  /** Replace all files (initial scan). */
+  /** Adopt the initial worker graph without computing it again. */
+  adoptAll(parsed: ParsedFile[], graph: CodeGraph): void {
+    this.files = new Map(parsed.map((file) => [file.path, file]));
+    this.index = new Set(this.files.keys());
+    this.lastNodes = new Map(graph.nodes.map((node) => [node.id, node]));
+    this.lastEdges = new Map(graph.edges.map((edge) => [edgeKey(edge), edge.weight]));
+  }
+
+  /** Adopt an already-computed worker patch without rebuilding the graph again. */
+  adoptPatch(changed: ParsedFile[], removed: string[], patch: GraphPatch): void {
+    for (const rel of removed) { this.files.delete(rel); this.index.delete(rel); }
+    for (const file of changed) { this.files.set(file.path, file); this.index.add(file.path); }
+    for (const id of patch.removedNodeIds) this.lastNodes.delete(id);
+    for (const node of [...patch.addedNodes, ...patch.updatedNodes]) this.lastNodes.set(node.id, node);
+    for (const edge of patch.removedEdges) this.lastEdges.delete(edgeKey(edge));
+    for (const edge of [...patch.addedEdges, ...patch.updatedEdges]) this.lastEdges.set(edgeKey(edge), edge.weight);
+  }
+
   setAll(parsed: ParsedFile[]): CodeGraph {
     this.files.clear();
     this.index.clear();
@@ -246,7 +263,7 @@ export class GraphBuilder {
 
     const clusterOf = this.computeClusterOf();
     const nodes: GraphNode[] = [...this.files.values()].map((f) => {
-      const doc = f.lang === 'md';
+      const doc = f.lang === 'md' || f.lang === 'other';
       const isTest = !doc && isTestPath(f.path);
       const inDegree = inDeg.get(f.path) ?? 0;
       return {

@@ -55,6 +55,8 @@ export interface FlareApi {
     options?: SearchOptions,
     paths?: string[],
   ): Promise<{ files: number; replacements: number }>;
+  transferFiles(sources: string[], target: string, move: boolean): Promise<{ error?: string }>;
+  importFile(rel: string, base64: string): Promise<{ error?: string }>;
   createFile(rel: string): Promise<boolean>;
   createDir(rel: string): Promise<boolean>;
   rescan(): Promise<void>;
@@ -255,6 +257,8 @@ export function createApi(t: FlareTransport): FlareApi {
     searchText: (query, options) => call('search:text', query, options ?? {}),
     searchReplace: (query, replacement, options, paths) =>
       call('search:replace', query, replacement, options ?? {}, paths),
+    transferFiles: (sources, target, move) => call('file:transfer', sources, target, move),
+    importFile: (rel, base64) => call('file:import', rel, base64),
     createFile: (rel) => call('file:create', rel),
     createDir: (rel) => call('dir:create', rel),
     rescan: () => call('project:rescan'),

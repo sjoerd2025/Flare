@@ -32,7 +32,59 @@ function Icon({ children, size = 14 }: { children: ReactNode; size?: number }) {
   );
 }
 
-/** nodes and the edges between them — the graph */
+/** File and folder actions follow familiar file-manager shapes. */
+export const IconNewFile = ({ size }: { size?: number }) => (
+  <Icon size={size}>
+    <path d="M9 14H3V2h6l3 3v3 M9 2v3h3 M12 10v5 M9.5 12.5h5" />
+  </Icon>
+);
+
+export const IconFolder = ({ size }: { size?: number }) => (
+  <Icon size={size}>
+    <path d="M1.5 4V3h5l1.5 2h6.5v8h-13V4Z" />
+  </Icon>
+);
+
+export const IconNewFolder = ({ size }: { size?: number }) => (
+  <Icon size={size}>
+    <path d="M7 13H1.5V3h5L8 5h6.5v3 M12 10v5 M9.5 12.5h5" />
+  </Icon>
+);
+
+export const IconCollapseAll = ({ size }: { size?: number }) => (
+  <Icon size={size}>
+    <path d="M5 2h9v9 M5 9h5" />
+    <rect x="2" y="5" width="11" height="9" rx="1" />
+  </Icon>
+);
+
+/** Upload has a receiving tray; navigation uses a bent parent-folder arrow. */
+export const IconUpload = ({ size }: { size?: number }) => (
+  <Icon size={size}>
+    <path d="M8 10V2 M5 5l3-3 3 3 M2 10v4h12v-4" />
+  </Icon>
+);
+
+export const IconParentFolder = ({ size }: { size?: number }) => (
+  <Icon size={size}>
+    <path d="M12.5 13H5V2 M2 5l3-3 3 3" />
+  </Icon>
+);
+
+export const IconHome = ({ size }: { size?: number }) => (
+  <Icon size={size}>
+    <path d="m1.5 7 6.5-5.5L14.5 7 M3 6v8h3.5V9h3v5H13V6" />
+  </Icon>
+);
+
+export const IconChevron = ({ size }: { size?: number }) => (
+  <Icon size={size}><path d="m6 4 4 4-4 4" /></Icon>
+);
+
+export const IconClose = ({ size }: { size?: number }) => (
+  <Icon size={size}><path d="m4 4 8 8 M12 4l-8 8" /></Icon>
+);
+
 export const IconGraph = ({ size }: { size?: number }) => (
   <Icon size={size}>
     <circle cx="4" cy="4.5" r="2" />
